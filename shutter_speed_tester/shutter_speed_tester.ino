@@ -1,7 +1,13 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
 #define LIGHT_PIN A7
+#define MEAS_BUFF_SIZE 129
+#define MAX_LIGHT 1024
+#define MAX_PX 32
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
@@ -15,7 +21,9 @@ volatile boolean fallingEdgeFlag;
 volatile unsigned long overflowCount;
 volatile unsigned long pulseStartTime;
 volatile unsigned long pulseFinishTime;
-float pulseWidth; //us
+float pulseWidth = 0; //us
+
+bool OLEDinited = true;
 
 ISR(TIMER1_OVF_vect){
   // timer overflows (every 65536 counts)
@@ -79,39 +87,129 @@ void reArmTC(){
   initTC(); //re-arm for next pulse
 }
 
+int countWholeDigits(float number){
+  int cnt = 1;
+  while(number >= 10){
+    cnt++;
+    number /= 10;
+  }
+  return cnt;
+}
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-//int value = 0;
-//void setup() {
-//  // put your setup code here, to run once:
-//  Serial.begin(115200);
-//  pinMode(LIGHT_PIN, INPUT);
-//}
-//
-//void loop() {
-//  // put your main code here, to run repeatedly:
-//  value = analogRead(LIGHT_PIN);
-//  Serial.println(value);
-//  delay(100);
-//}
-void setup(){
-  Serial.begin(115200);       
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;); // Don't proceed, loop forever
+int value = 0;
+int values[MEAS_BUFF_SIZE];
+int start_guard = 0;
+
+char buf1[20] = "";
+
+void displayMeasured(float t_us){
+  display.setCursor(0,0);
+
+  float t = t_us;
+  uint8_t cnt = 0;
+  while(t >= 1000 && cnt < 2){
+    t /= 1000;
+    cnt++;
   }
   
-  pulseWidth = 0; //us
+  int dnum = countWholeDigits(t);
+  dtostrf(t, 8, 10-dnum-3, buf1);
+  display.print(buf1);
+  float sec_den;
+  switch(cnt){
+    case 0:
+      display.println("us");
+      sec_den = 1/(t/1000000);
+      break;
+    case 1:
+      display.println("ms");
+      sec_den = 1/(t/1000);
+      break;
+    case 2:
+      display.println("s");
+      sec_den = 1/t;
+      break;
+  }
+
+  dnum = countWholeDigits(sec_den);
+  dtostrf(sec_den, 7, 10-dnum-4, buf1);
+  display.print("1/");
+  display.print(buf1);
+  display.print("s");
+}
+
+int lightToPx(int light, int max_px, int max_light){
+  return (int)((float)light/max_light * max_px);
+}
+
+int mod(int x, int y){
+  return x < 0 ? ((x+1)%y)+y - 1 : x%y;
+}
+
+void updateCurve(){
+  int x, y;
+  for(int i = 0; i < SCREEN_WIDTH; i++){
+    x = SCREEN_WIDTH - 1 - i;
+    y = SCREEN_HEIGHT - 1 - lightToPx(values[mod((start_guard - i -1), MEAS_BUFF_SIZE)], MAX_PX, MAX_LIGHT);
+    display.drawPixel(x, y, SSD1306_BLACK);
+    y = SCREEN_HEIGHT - 1 - lightToPx(values[mod((start_guard - i), MEAS_BUFF_SIZE)], MAX_PX, MAX_LIGHT);
+    display.drawPixel(x, y, SSD1306_WHITE);
+  }
+}
+
+
+unsigned int cmp_lvl_px = lightToPx(500, MAX_PX, MAX_LIGHT);
+void drawCompareLevel(){
+  uint8_t dash_length = 12;
+  int y = SCREEN_HEIGHT - 1 - cmp_lvl_px;
+  for(uint8_t x = 0; x < SCREEN_WIDTH; x++){
+    if(x % (dash_length) < 4)
+      display.drawPixel(x, y, SSD1306_WHITE);
+    else
+      display.drawPixel(x, y, SSD1306_BLACK);
+  }
+}
+
+void setup(){
+  Serial.begin(115200);    
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    OLEDinited = false;
+  }
+  
   // set up for interrupts
   initTC();  
+
+  if(OLEDinited){
+    display.clearDisplay();
+    
+    display.setTextSize(2);             // Normal 1:1 pixel scale
+    display.setTextColor(SSD1306_WHITE);        // Draw white text
+    drawCompareLevel();
+    display.display();
+  }
 }
 
 void loop(){
   if(fallingEdgeFlag){
     calculatePulseWidth();
+    reArmTC();
     Serial.print ("PulseWidth: ");
     Serial.print (pulseWidth);
     Serial.println (" µs. ");
-    reArmTC();
+    display.clearDisplay();
+    displayMeasured(pulseWidth);
   } 
+  
+  value = analogRead(LIGHT_PIN);
+  start_guard++;
+  values[start_guard % MEAS_BUFF_SIZE] = value;
+  
+  drawCompareLevel();
+  updateCurve();
+  display.display();
+  Serial.println(value);
+  delay(50);
 }
